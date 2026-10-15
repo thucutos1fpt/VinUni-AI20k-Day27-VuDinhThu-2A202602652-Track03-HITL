@@ -75,7 +75,8 @@ def node_escalate(state: ReviewState) -> dict:
     #       pr_url, confidence, confidence_reasoning, summary, risk_factors, questions.
     # answers = interrupt({...})
     # return {"escalation_answers": answers}
-    raise NotImplementedError("Call interrupt() with an escalation payload")
+    answers = interrupt({"kind": "escalation", "pr_url": state["pr_url"], "confidence": a.confidence, "confidence_reasoning": a.confidence_reasoning, "summary": a.summary, "risk_factors": a.risk_factors, "questions": questions})
+    return {"escalation_answers": answers}
 
 
 def node_synthesize(state: ReviewState) -> dict:
@@ -86,7 +87,9 @@ def node_synthesize(state: ReviewState) -> dict:
     #     containing the original diff + initial analysis + Q&A.
     #   - return {"analysis": refined}
     # `node_commit` will then post the refined review to the PR.
-    raise NotImplementedError("Synthesize a refined PRAnalysis using the reviewer answers")
+    qa = "\n".join(f"Q: {q}\nA: {a}" for q, a in (state.get("escalation_answers") or {}).items())
+    refined = get_llm().with_structured_output(PRAnalysis).invoke([{"role": "system", "content": "Refine this code review using reviewer answers. Return structured output."}, {"role": "user", "content": f"Diff:\n{state['pr_diff']}\n\nReviewer Q&A:\n{qa}"}])
+    return {"analysis": refined}
 
 
 def node_human_approval(state):
@@ -161,6 +164,8 @@ def build_graph():
     g.add_edge("auto_approve", END)
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
+    g.add_edge("escalate", "synthesize")
+    g.add_edge("synthesize", "commit")
     # TODO: wire escalate → synthesize → commit  (commit already → END)
     return g.compile(checkpointer=MemorySaver())
 

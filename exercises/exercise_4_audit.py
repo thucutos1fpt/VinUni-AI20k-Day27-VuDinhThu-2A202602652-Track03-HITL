@@ -63,7 +63,22 @@ async def audit(state, entry: AuditEntry) -> None:
     """
     # TODO: call write_audit_event(thread_id=state["thread_id"],
     #                              pr_url=state["pr_url"], entry=entry)
-    raise NotImplementedError("Implement the audit() body — one call to write_audit_event")
+    await write_audit_event(thread_id=state["thread_id"], pr_url=state["pr_url"], entry=entry)
+
+
+async def log_event(state, action, decision, reason, started, reviewer_id=None, analysis=None):
+    current = analysis or state.get("analysis")
+    confidence = current.confidence if current else 0.0
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action=action,
+        confidence=confidence,
+        risk_level=risk_level_for(confidence) if current else "med",
+        reviewer_id=reviewer_id,
+        decision=decision,
+        reason=reason,
+        execution_time_ms=int((time.monotonic() - started) * 1000),
+    ))
 
 
 # ─── Reference example — read this carefully ───────────────────────────────
@@ -108,6 +123,7 @@ async def node_analyze(state):
         ])
     console.print(f"  [green]✓[/green] confidence={a.confidence:.0%}, {len(a.comments)} comment(s)")
     # TODO: build and emit an AuditEntry for this step. Use the LLM's output `a`.
+    await log_event(state, "analyze", "pending", a.confidence_reasoning, t0, analysis=a)
     return {"analysis": a}
 
 
@@ -123,6 +139,7 @@ async def node_route(state):
         decision = "human_approval"
     console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
     # TODO: emit an AuditEntry — this is the first row where `decision` is real.
+    await log_event(state, "route", decision, f"Routed at confidence {c:.0%}", t0)
     return {"decision": decision}
 
 
@@ -132,6 +149,7 @@ async def node_human_approval(state):
 
     # TODO #1 — audit BEFORE the interrupt. No human has responded yet.
 
+    await log_event(state, "human_approval", "pending", "Waiting for reviewer decision", t0)
     resp = interrupt({
         "kind": "approval_request",
         "pr_url": state["pr_url"],
@@ -145,6 +163,7 @@ async def node_human_approval(state):
     # TODO #2 — audit AFTER resume. Now you know the reviewer's choice
     #           (approve / reject / edit), their feedback, and who they are
     #           (os.environ.get("GITHUB_USER")).
+    await log_event(state, "human_approval", resp.get("choice", "pending"), resp.get("feedback"), t0, os.environ.get("GITHUB_USER"))
     return {"human_choice": resp.get("choice"), "human_feedback": resp.get("feedback")}
 
 
@@ -184,6 +203,7 @@ async def node_commit(state):
         console.print(f"  [yellow]·[/yellow] skipping comment (choice={state.get('human_choice')})")
         action = "rejected"
     # TODO: emit an AuditEntry summarising what was committed (or rejected).
+    await log_event(state, "commit", "approve" if action == "committed" else "reject", action, t0, os.environ.get("GITHUB_USER"))
     return {"final_action": action}
 
 
@@ -193,6 +213,7 @@ async def node_auto_approve(state):
     a = state["analysis"]
     action = _post(state)
     # TODO: emit an AuditEntry — no human was involved, decision is "auto".
+    await log_event(state, "auto_approve", "auto", action, t0)
     return {"final_action": f"auto_{action}"}
 
 
@@ -203,6 +224,7 @@ async def node_escalate(state):
 
     # TODO #1 — audit BEFORE the interrupt (reviewer hasn't answered yet).
 
+    await log_event(state, "escalate", "pending", "Waiting for answers: " + "; ".join(questions), t0)
     answers = interrupt({
         "kind": "escalation",
         "pr_url": state["pr_url"],
@@ -214,6 +236,7 @@ async def node_escalate(state):
     })
 
     # TODO #2 — audit AFTER resume. You now have the answers.
+    await log_event(state, "escalate", "escalate", "Reviewer provided escalation answers", t0, os.environ.get("GITHUB_USER"))
     return {"escalation_answers": answers}
 
 
@@ -231,6 +254,7 @@ async def node_synthesize(state):
     # TODO: emit an AuditEntry — use the NEW confidence (refined.confidence),
     #       which should be higher than the original analysis.
     # node_commit will run next and post the refined review to the PR.
+    await log_event(state, "synthesize", "escalate", refined.confidence_reasoning, t0, os.environ.get("GITHUB_USER"), analysis=refined)
     return {"analysis": refined}
 
 

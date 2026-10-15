@@ -47,7 +47,10 @@ def node_analyze(state: ReviewState) -> dict:
     # When implemented, wrap the call in:
     #        with console.status("[dim]LLM thinking...[/dim]"):
     #            analysis = llm.invoke([...])
-    raise NotImplementedError("Implement node_analyze")
+    llm = get_llm().with_structured_output(PRAnalysis)
+    with console.status("[dim]LLM thinking...[/dim]"):
+        analysis = llm.invoke([{"role": "system", "content": "You are a senior code reviewer. Return a complete structured review."}, {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"}])
+    return {"analysis": analysis}
 
 
 def node_route(state: ReviewState) -> dict:
@@ -55,7 +58,8 @@ def node_route(state: ReviewState) -> dict:
     # TODO: read state["analysis"].confidence and return
     #       {"decision": "auto_approve" | "human_approval" | "escalate"}
     # Thresholds provided: AUTO_APPROVE_THRESHOLD (0.85) and ESCALATE_THRESHOLD (0.60).
-    raise NotImplementedError("Implement node_route")
+    c = state["analysis"].confidence
+    return {"decision": "auto_approve" if c >= AUTO_APPROVE_THRESHOLD else "escalate" if c < ESCALATE_THRESHOLD else "human_approval"}
 
 
 def node_auto_approve(state: ReviewState) -> dict:
@@ -75,6 +79,14 @@ def node_escalate(state: ReviewState) -> dict:
 
 def build_graph():
     g = StateGraph(ReviewState)
+    for name, fn in [("fetch_pr", node_fetch_pr), ("analyze", node_analyze), ("route", node_route), ("auto_approve", node_auto_approve), ("human_approval", node_human_approval), ("escalate", node_escalate)]:
+        g.add_node(name, fn)
+    g.add_edge(START, "fetch_pr")
+    g.add_edge("fetch_pr", "analyze")
+    g.add_edge("analyze", "route")
+    g.add_conditional_edges("route", lambda s: s["decision"], {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"})
+    for node in ("auto_approve", "human_approval", "escalate"):
+        g.add_edge(node, END)
     # TODO: add_node for the 6 nodes above (fetch_pr, analyze, route, auto_approve, human_approval, escalate)
     # TODO: add_edge from START → fetch_pr → analyze → route
     # TODO: add_conditional_edges on "route" with mapping
